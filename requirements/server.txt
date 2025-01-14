@@ -1,0 +1,5 @@
+flask==2.2.3
+picamera==1.13
+tensorflow==2.12.0
+numpy==1.23.5
+pillow==9.5.0
