@@ -13,7 +13,7 @@ class CameraThread(QThread):
     def __init__(self):
         super().__init__()
         self.running = False
-        self.server_url = "http://192.168.1.118:5000"  # Raspberry Pi IP adresi
+        self.server_url = "http://192.168.225.171:5000"  # Raspberry Pi IP adresi
 
     def start(self):
         if not self.running:

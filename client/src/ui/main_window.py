@@ -8,6 +8,9 @@ from PyQt5.QtGui import QPixmap, QFont, QIcon, QPalette, QColor
 from utils.image_processing import CameraThread
 from ui.prediction_panel import PredictionPanel
 import shutil
+from utils.model_loader import ModelLoader
+
+
 
 
 class LabelDialog(QDialog):
@@ -226,8 +229,6 @@ class MainWindow(QMainWindow):
             os.path.join(self.training_dir, 'bad'),
             os.path.join(self.test_dir, 'good'),
             os.path.join(self.test_dir, 'bad'),
-
-            # Yeni feedback klasörleri
             os.path.join(self.feedback_dir, 'correct', 'good'),
             os.path.join(self.feedback_dir, 'correct', 'bad'),
             os.path.join(self.feedback_dir, 'incorrect', 'good_to_bad'),
@@ -236,7 +237,38 @@ class MainWindow(QMainWindow):
             os.makedirs(path, exist_ok=True)
 
         self.current_mode = 'training'
+
+        # Initialize model loading
+        self.model = None
+        self.model_path = os.path.join(project_root, 'model', 'saved_models', 'wall_model_final.h5')
+        self.init_model_loading()
+
+        # Initialize UI after starting model load
         self.init_ui()
+
+    def init_model_loading(self):
+        """Initialize and start model loading"""
+        self.model_loader = ModelLoader(self.model_path)
+        self.model_loader.model_loaded.connect(self.on_model_loaded)
+        self.model_loader.model_error.connect(self.on_model_error)
+        self.model_loader.start()
+
+    def on_model_loaded(self, model):
+        """Handle successful model loading"""
+        self.model = model
+        self.status_label.setText('Model: Loaded | Camera: Off')
+        # Enable test mode if it was disabled
+        self.test_radio.setEnabled(True)
+        print("Model loaded successfully!")
+
+    def on_model_error(self, error_message):
+        """Handle model loading error"""
+        self.status_label.setText('Model: Error | Camera: Off')
+        QMessageBox.warning(
+            self,
+            "Model Loading Error",
+            f"Failed to load model: {error_message}"
+        )
 
     def init_ui(self):
         self.setWindowTitle('Wall Quality Analysis System')
@@ -346,8 +378,8 @@ class MainWindow(QMainWindow):
         btn_layout.addWidget(self.capture_btn)
         btn_layout.addStretch()
 
-        # Status label
-        self.status_label = QLabel('Camera: Off')
+        # Status label with model status
+        self.status_label = QLabel('Model: Loading... | Camera: Off')
         self.status_label.setAlignment(Qt.AlignCenter)
         self.status_label.setStyleSheet("""
            QLabel {
@@ -359,6 +391,9 @@ class MainWindow(QMainWindow):
                border-radius: 4px;
            }
        """)
+
+        # Disable test mode until model is loaded
+        self.test_radio.setEnabled(False)
 
         # Add everything to main layout
         layout.addWidget(mode_group)
@@ -373,12 +408,12 @@ class MainWindow(QMainWindow):
             if self.camera_thread.start():
                 self.start_camera_btn.setText('Stop Camera')
                 self.capture_btn.setEnabled(True)
-                self.status_label.setText('Camera: On')
+                self.status_label.setText(f'Model: {"Loaded" if self.model else "Loading..."} | Camera: On')
         else:
             self.camera_thread.stop()
             self.start_camera_btn.setText('Start Camera')
             self.capture_btn.setEnabled(False)
-            self.status_label.setText('Camera: Off')
+            self.status_label.setText(f'Model: {"Loaded" if self.model else "Loading..."} | Camera: Off')
             self.preview_label.clear()
 
     def update_frame(self, qimage):
@@ -387,11 +422,19 @@ class MainWindow(QMainWindow):
         self.preview_label.setPixmap(scaled_pixmap)
 
     def mode_changed(self, button):
+        if button == self.test_radio and self.model is None:
+            QMessageBox.warning(self, "Warning", "Please wait for the model to load before switching to test mode.")
+            self.training_radio.setChecked(True)
+            return
+
         self.current_mode = 'training' if button == self.training_radio else 'test'
 
-
-
     def capture_image(self):
+        # Ensure model is loaded for test mode
+        if self.current_mode == 'test' and self.model is None:
+            QMessageBox.warning(self, "Warning", "Please wait for the model to load before using test mode.")
+            return
+
         save_dir = self.training_dir if self.current_mode == 'training' else self.test_dir
         filepath, message = self.camera_thread.capture_image(save_dir)
 
@@ -401,7 +444,7 @@ class MainWindow(QMainWindow):
 
         try:
             if self.current_mode == 'training':
-                # Training mode
+                # Training mode logic
                 dialog = LabelDialog(self, filepath)
                 if dialog.exec_() == QDialog.Accepted and dialog.result:
                     new_dir = os.path.join(save_dir, dialog.result)
@@ -409,28 +452,31 @@ class MainWindow(QMainWindow):
                     os.rename(filepath, new_path)
                     QMessageBox.information(self, "Success", "Image saved and labeled successfully!")
             else:
-                # Test mode
-                dialog = ResultDialog(parent=self, image_path=filepath)
+                # Pass the loaded model to ResultDialog
+                dialog = ResultDialog(self, filepath)
+                dialog.prediction_panel.model = self.model  # Set the loaded model
+
                 if dialog.exec_() == QDialog.Accepted:
                     if dialog.feedback is not None:
-                        # Handle feedback and save image
                         if dialog.prediction:
-                            if dialog.feedback:  # Prediction was correct
+                            if dialog.feedback:
                                 feedback_dir = os.path.join(self.feedback_dir, 'correct', dialog.prediction)
-                            else:  # Prediction was incorrect
+                            else:
                                 if dialog.prediction == 'good':
                                     feedback_dir = os.path.join(self.feedback_dir, 'incorrect', 'good_to_bad')
                                 else:
                                     feedback_dir = os.path.join(self.feedback_dir, 'incorrect', 'bad_to_good')
 
-                            # Save to feedback directory
+                            os.makedirs(feedback_dir, exist_ok=True)
                             feedback_path = os.path.join(feedback_dir, os.path.basename(filepath))
                             shutil.copy2(filepath, feedback_path)
 
-                            # Save to test directory
-                            test_dir = os.path.join(self.test_dir,
-                                                    dialog.prediction if dialog.feedback else
-                                                    ('bad' if dialog.prediction == 'good' else 'good'))
+                            test_dir = os.path.join(
+                                self.test_dir,
+                                dialog.prediction if dialog.feedback else (
+                                    'bad' if dialog.prediction == 'good' else 'good')
+                            )
+                            os.makedirs(test_dir, exist_ok=True)
                             test_path = os.path.join(test_dir, os.path.basename(filepath))
                             os.rename(filepath, test_path)
 
@@ -447,4 +493,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self.camera_thread.stop()
+        if hasattr(self, 'model_loader'):
+            self.model_loader.quit()
+            self.model_loader.wait()
         super().closeEvent(event)
