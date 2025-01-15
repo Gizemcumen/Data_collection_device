@@ -23,7 +23,8 @@ from PyQt5.QtGui import QPixmap, QFont, QIcon, QPalette, QColor
 from utils.image_processing import CameraThread
 from utils.model_loader import ModelLoader
 import shutil
-from PyQt5.QtWidgets import QDesktopWidget, QSizePolicy
+
+
 
 class LabelDialog(QDialog):
     def __init__(self, parent=None, image_path=None):
@@ -33,19 +34,6 @@ class LabelDialog(QDialog):
         self.init_ui()
 
     def init_ui(self):
-        # Get available screen size
-        screen = QDesktopWidget().availableGeometry()
-        dialog_width = min(800, screen.width() * 0.7)
-        dialog_height = min(700, screen.height() * 0.7)
-
-        self.setWindowTitle('Label Image')
-        self.resize(int(dialog_width), int(dialog_height))
-
-        # Center the dialog on screen
-        frame_geometry = self.frameGeometry()
-        screen_center = screen.center()
-        frame_geometry.moveCenter(screen_center)
-        self.move(frame_geometry.topLeft())
         self.setWindowTitle('Label Image')
         self.setFixedSize(800, 700)
         self.setStyleSheet("""
@@ -143,19 +131,6 @@ class ResultDialog(QDialog):
                 self.confidence = 0
 
     def init_ui(self):
-        # Get available screen size
-        screen = QDesktopWidget().availableGeometry()
-        dialog_width = min(800, screen.width() * 0.7)
-        dialog_height = min(800, screen.height() * 0.7)
-
-        self.setWindowTitle('Analysis Result')
-        self.resize(int(dialog_width), int(dialog_height))
-
-        # Center the dialog on screen
-        frame_geometry = self.frameGeometry()
-        screen_center = screen.center()
-        frame_geometry.moveCenter(screen_center)
-        self.move(frame_geometry.topLeft())
         """UI bileşenlerini oluştur"""
         self.setWindowTitle('Analiz Sonucu')
         self.setFixedSize(800, 800)
@@ -248,7 +223,6 @@ class ResultDialog(QDialog):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.prediction_thread = None  # Add this line
 
         # Initialize camera
         self.camera_thread = CameraThread()
@@ -617,15 +591,26 @@ class MainWindow(QMainWindow):
                     os.rename(filepath, new_path)
                     QMessageBox.information(self, "Success", "Image saved and labeled successfully!")
             else:
-                # Create and start prediction thread
-                self.capture_btn.setEnabled(False)  # Disable capture button during prediction
-                self.current_image_path = filepath  # Store the filepath
+                # Make prediction
+                result, confidence = self.predict_image(filepath)
+                if result:
+                    # Update progress bars
+                    self.good_progress.setValue(int(confidence if result == 'good' else 100 - confidence))
+                    self.bad_progress.setValue(int(100 - confidence if result == 'good' else confidence))
 
-                self.prediction_thread = PredictionThread(self.model, filepath)
-                self.prediction_thread.prediction_ready.connect(self.handle_prediction_result)
-                self.prediction_thread.prediction_error.connect(self.handle_prediction_error)
-                self.prediction_thread.finished.connect(lambda: self.capture_btn.setEnabled(True))
-                self.prediction_thread.start()
+                    # Update prediction label
+                    self.prediction_label.setText(
+                        f"Prediction: {'GOOD' if result == 'good' else 'BAD'}\n"
+                        f"Confidence: {confidence:.1f}%"
+                    )
+
+                    # Store current image path for feedback
+                    self.current_image_path = filepath
+                    self.current_prediction = result
+
+                    # Enable feedback buttons
+                    self.correct_btn.setEnabled(True)
+                    self.incorrect_btn.setEnabled(True)
 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"An error occurred: {str(e)}")
@@ -634,34 +619,6 @@ class MainWindow(QMainWindow):
                     os.remove(filepath)
                 except:
                     pass
-
-    def handle_prediction_result(self, result, confidence):
-        """Handle the prediction results from the thread"""
-        try:
-            # Update progress bars
-            self.good_progress.setValue(int(confidence if result == 'good' else 100 - confidence))
-            self.bad_progress.setValue(int(100 - confidence if result == 'good' else confidence))
-
-            # Update prediction label
-            self.prediction_label.setText(
-                f"Prediction: {'GOOD' if result == 'good' else 'BAD'}\n"
-                f"Confidence: {confidence:.1f}%"
-            )
-
-            # Store prediction result
-            self.current_prediction = result
-
-            # Enable feedback buttons
-            self.correct_btn.setEnabled(True)
-            self.incorrect_btn.setEnabled(True)
-
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Error handling prediction result: {str(e)}")
-
-    def handle_prediction_error(self, error_message):
-        """Handle any errors that occur during prediction"""
-        QMessageBox.critical(self, "Prediction Error", f"Error during prediction: {error_message}")
-        self.capture_btn.setEnabled(True)
 
     def record_feedback(self, is_correct):
         """Record user feedback for the prediction"""
@@ -707,41 +664,3 @@ class MainWindow(QMainWindow):
             self.model_loader.quit()
             self.model_loader.wait()
         super().closeEvent(event)
-
-
-class PredictionThread(QThread):
-    prediction_ready = pyqtSignal(str, float)
-    prediction_error = pyqtSignal(str)
-
-    def __init__(self, model, image_path):
-        super().__init__()
-        self.model = model
-        self.image_path = image_path
-
-    def run(self):
-        try:
-            # Load and preprocess the image
-            img = cv2.imread(self.image_path)
-            if img is None:
-                raise ValueError("Could not read image")
-
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            img = cv2.resize(img, (224, 224))
-            img = img.astype('float32') / 255.0
-            img = np.expand_dims(img, axis=0)
-
-            # Make prediction
-            prediction = self.model.predict(img, verbose=0)[0][0]
-
-            good_percent = prediction * 100
-            bad_percent = (1 - prediction) * 100
-            print(f"Good: {good_percent:.2f}%, Bad: {bad_percent:.2f}%")
-            # Determine result and confidence
-            result = "good" if prediction > 0.5 else "bad"
-            confidence = prediction * 100 if prediction > 0.5 else (1 - prediction) * 100
-            print(f"Result : {result}")
-            # Emit the result
-            self.prediction_ready.emit(result, confidence)
-
-        except Exception as e:
-            self.prediction_error.emit(str(e))
